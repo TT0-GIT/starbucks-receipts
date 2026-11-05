@@ -28,6 +28,20 @@
   .price { font-weight:700; color:var(--g); }
   .note { margin-top:10px; padding:8px 10px; background:#f3f1e8; border-radius:8px; font-size:14px; white-space:pre-wrap; word-break:break-word; }
   pre { white-space:pre-wrap; word-break:break-word; margin:8px 0 0; font:inherit; font-size:15px; }
+  /* receipt block: styled to look like the Starbucks app */
+  .rc { margin-top:12px; padding:12px 14px; background:#faf9f5; border:1px solid var(--bd); border-radius:10px; }
+  .rc-line { display:flex; justify-content:space-between; align-items:baseline; gap:12px; font-size:15px; line-height:1.6; word-break:break-word; }
+  .rc-line .amt { white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .rc-line.base { font-size:21px; font-weight:600; line-height:1.3; margin-bottom:4px; }
+  .rc-line.size { color:var(--mut); }
+  .rc-sum { margin-top:12px; padding-top:10px; border-top:1px solid var(--bd); }
+  .rc-sum .rc-line .dots { flex:1; border-bottom:2px dotted #bdbdb5; min-width:12px; transform:translateY(-4px); }
+  .rc-sum .rc-line.green { color:var(--g); font-weight:600; }
+  .rc-sum .rc-line.total { font-size:21px; font-weight:700; margin-top:2px; }
+  .head { display:flex; gap:12px; align-items:center; }
+  .head .hd { min-width:0; }
+  .thumb { width:64px; height:64px; flex:none; border-radius:14px; background:#f0ece3; display:flex; align-items:center; justify-content:center; }
+  .thumb svg { width:54px; height:54px; }
   .row { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
   .two { display:flex; gap:8px; } .two > div { flex:1; }
   .status { color:var(--mut); font-size:14px; margin-top:6px; }
@@ -157,7 +171,23 @@ function parseReceipt(text) {
 
   let start = find(/or schedule/i);
   let end = find(/rewards available|pairs well|^checkout/i);
-  if (start < 0) return { base: '', store, body: text.trim(), price: '', found: false };
+  if (start < 0) {
+    // Second layout: "Order details" screen. The base line carries its own price,
+    // and the summary (Discount / Subtotal / Tax / Total) is kept at the bottom.
+    const priced = l => /[A-Za-z]{3}/.test(l) && /\$\d+\.\d{2}\s*$/.test(l);
+    const s = lines.findIndex(priced);
+    let t = -1;
+    lines.forEach((l, i) => { if (/^total\b/i.test(l)) t = i; });
+    if (s >= 0 && t > s) {
+      const kept = lines.slice(s, t + 1)
+        .filter(l => /[A-Za-z]{2}/.test(l) || /\$\d/.test(l))
+        .map(l => l.replace(/^[^A-Za-z0-9$+\-]+/, ''));
+      const base = kept[0].replace(/\s*\$\d+\.\d{2}\s*$/, '').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
+      const tm = kept[kept.length - 1].match(/\$(\d+\.\d{2})/);
+      return { base, store, body: kept.join('\n'), price: tm ? tm[1] : '', found: true };
+    }
+    return { base: '', store, body: text.trim(), price: '', found: false };
+  }
   start += 1;
   if (end < start) end = lines.length;
 
@@ -252,6 +282,88 @@ function letterOf(r) {
   return /[A-Z]/.test(c) ? c : '#';
 }
 
+// ---------- draw the saved text like the Starbucks receipt ----------
+// Line rules: first line = base drink (large) · "fl oz" line = base size (grey)
+// · trailing $ amounts go to the right · Discount/Subtotal/Tax/Total form a summary block
+const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+function splitPrice(line) {
+  const m = line.match(/^(.*?)[\s.…·]*([+\-−–]\s*)?\$\s*(\d+(?:\.\d{1,2})?)\s*$/);
+  if (!m) return [line, ''];
+  const sign = (m[2] || '').replace(/\s/g, '').replace(/[−–]/g, '-');
+  return [m[1].trim(), sign + '$' + m[3]];
+}
+function receiptHTML(r) {
+  const lines = String(r.body || '').split('\n').map(l => l.trim())
+    .filter(l => /[A-Za-z]/.test(l) || /\$\d/.test(l));          // drop OCR junk like "-—"
+  if (!lines.length) return '';
+  const row = (cls, text, amt, dots) =>
+    `<div class="rc-line ${cls}"><span>${esc(text)}</span>${dots ? '<span class="dots"></span>' : ''}<span class="amt">${esc(amt)}</span></div>`;
+
+  let html = '', summary = '', inSummary = false;
+  const first = splitPrice(lines[0]);
+  const firstIsBase = !norm(r.base_drink) || norm(first[0]) === norm(r.base_drink);
+  if (firstIsBase) {
+    html += row('base', first[0].replace(/([a-z])([A-Z])/g, '$1 $2'), first[1]);
+    lines.shift();
+  } else {
+    html += row('base', r.base_drink, '');
+  }
+  for (const l of lines) {
+    const [text, amt] = splitPrice(l);
+    if (/^(reward|discount|subtotal|tax|total)\b/i.test(text)) inSummary = true;
+    if (inSummary) {
+      const cls = /^(reward|discount)/i.test(text) ? 'green' : /^total/i.test(text) ? 'total' : '';
+      summary += row(cls, text, amt, !/^reward/i.test(text));
+    } else {
+      html += row(/\bfl\s*oz\b/i.test(text) ? 'size' : '', text, amt);
+    }
+  }
+  return `<div class="rc">${html}${summary ? `<div class="rc-sum">${summary}</div>` : ''}</div>`;
+}
+
+// ---------- little drawn cup, colored from the drink (original artwork, no photos) ----------
+// Cold = tall cup with ice and straw, Hot = glass mug with steam.
+// Layers: milk at the bottom (if any), drink in the middle, foam on top (if any).
+function cupSVG(r) {
+  const txt = [r.title, r.base_drink, r.body, r.tags].join(' ').toLowerCase();
+  const cold = r.temp ? r.temp === 'Cold' : /\bice\b|iced|cold/.test(txt);
+  const matcha = /matcha|macha/.test(txt);
+  const milk = /milk|cream|half & half|latte|creamer/.test(txt);
+  const foam = /foam/.test(txt);
+  const t = r.drink_type;
+  const coffeeish = t !== 'Refresher' && t !== 'Tea' && !(matcha && t !== 'Coffee');
+  const base = t === 'Refresher' ? '#e0566b' : (matcha && t !== 'Coffee') ? '#7fa650' : t === 'Tea' ? '#c98a3f' : t === 'Other' ? '#b9a58a' : '#4a2c1a';
+  const milkC = t === 'Refresher' ? '#f6d3d9' : coffeeish ? '#d9b88f' : '#efe6d2';
+  const foamC = matcha && foam ? '#bfd9a0' : '#f4ecdc';
+
+  const top = cold ? 20 : 28, total = cold ? 38 : 28;
+  const fH = foam ? (cold ? 8 : 6) : 0, mH = milk ? (cold ? 13 : 9) : 0, bH = total - fH - mH;
+  const id = 'cp' + r.id;
+  const layers = (x, w) =>
+    (fH ? `<rect x="${x}" y="${top}" width="${w}" height="${fH}" fill="${foamC}"/>` : '') +
+    `<rect x="${x}" y="${top + fH}" width="${w}" height="${bH}" fill="${base}"/>` +
+    (mH ? `<rect x="${x}" y="${top + fH + bH}" width="${w}" height="${mH}" fill="${milkC}"/>` : '');
+
+  if (cold) {
+    const shape = 'M15 14 L49 14 L44 58 L20 58 Z';
+    return `<svg viewBox="0 0 64 64" aria-hidden="true"><defs><clipPath id="${id}"><path d="${shape}"/></clipPath></defs>
+      <g clip-path="url(#${id})">${layers(10, 44)}
+        <g fill="#fff" fill-opacity=".3" stroke="#fff" stroke-opacity=".6" stroke-width="1">
+          <rect x="21" y="26" width="9" height="9" rx="2" transform="rotate(12 25 30)"/>
+          <rect x="33" y="34" width="9" height="9" rx="2" transform="rotate(-15 37 38)"/>
+          <rect x="25" y="45" width="9" height="9" rx="2" transform="rotate(20 29 49)"/>
+        </g></g>
+      <line x1="38" y1="4" x2="33" y2="38" stroke="#00704a" stroke-width="3.5" stroke-linecap="round"/>
+      <path d="${shape}" fill="none" stroke="#8a8577" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+  }
+  return `<svg viewBox="0 0 64 64" aria-hidden="true"><defs><clipPath id="${id}"><rect x="14" y="24" width="30" height="32" rx="5"/></clipPath></defs>
+    <g fill="none" stroke="#c9c4b6" stroke-width="2" stroke-linecap="round" opacity=".9">
+      <path d="M22 19c-3-3 3-5 0-9"/><path d="M29 19c-3-3 3-5 0-9"/><path d="M36 19c-3-3 3-5 0-9"/></g>
+    <g clip-path="url(#${id})">${layers(14, 30)}</g>
+    <path d="M44 30h3a6 6 0 0 1 0 14h-3" fill="none" stroke="#8a8577" stroke-width="3" stroke-linecap="round"/>
+    <rect x="14" y="24" width="30" height="32" rx="5" fill="none" stroke="#8a8577" stroke-width="1.5"/></svg>`;
+}
+
 function cardHTML(r) {
   const mine = user && r.user_id === user.id;
   const date = new Date(r.created_at).toLocaleDateString('en-US');
@@ -276,12 +388,17 @@ function cardHTML(r) {
   const hasName = (r.title || '').trim();
   const baseLine = hasName && r.base_drink ? `Base: ${esc(r.base_drink)} · ` : '';
   const storeLine = r.store ? `${esc(r.store)} · ` : '';
-  const priceLine = r.price != null ? `<span class="price">${money(r.price)}</span> · ` : '';
+  const priceLine = r.price != null && !/^\s*total\b/im.test(r.body || '') ?`<span class="price">${money(r.price)}</span> · ` : '';
   return `<div class="card">
-    <h3>${esc(nameOf(r)) || '<span class="meta">(Untitled)</span>'}</h3>
-    <div class="meta">${priceLine}${baseLine}${storeLine}Added by ${esc(r.author)} · ${date}</div>
+    <div class="head">
+      <div class="thumb">${cupSVG(r)}</div>
+      <div class="hd">
+        <h3>${esc(nameOf(r)) || '<span class="meta">(Untitled)</span>'}</h3>
+        <div class="meta">${priceLine}${baseLine}${storeLine}Added by ${esc(r.author)} · ${date}</div>
+      </div>
+    </div>
     <div>${chips}${tags}</div>
-    <pre>${esc(r.body)}</pre>
+    ${receiptHTML(r)}
     ${r.notes ? `<div class="note">📝 ${esc(r.notes)}</div>` : ''}
     ${mine ? `<div class="row"><button class="sec" onclick="editingId=${r.id};render()">Edit</button><button class="danger" onclick="del(${r.id})">Delete</button></div>` : ''}
   </div>`;
