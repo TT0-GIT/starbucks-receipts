@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Starbucks Receipts</title>
+<style>
+  :root { --g:#00704a; --bg:#f6f5f0; --card:#fff; --mut:#6b6b6b; --bd:#e3e1d8; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:16px/1.5 -apple-system,system-ui,sans-serif; background:var(--bg); color:#222; }
+  header { background:var(--g); color:#fff; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; }
+  header h1 { margin:0; font-size:18px; }
+  #auth { font-size:14px; display:flex; gap:6px; align-items:center; }
+  main { max-width:720px; margin:0 auto; padding:16px; }
+  input, textarea, button, select { font:inherit; }
+  input[type=text], input[type=number], input[type=email], input[type=search], textarea, select { width:100%; padding:10px; border:1px solid var(--bd); border-radius:8px; background:#fff; }
+  textarea { min-height:140px; }
+  button { padding:8px 14px; border:0; border-radius:8px; background:var(--g); color:#fff; cursor:pointer; }
+  button.sec { background:#e8e6dc; color:#222; }
+  button.danger { background:#b3261e; }
+  button:disabled { opacity:.5; }
+  .card { background:var(--card); border:1px solid var(--bd); border-radius:12px; padding:14px; margin-top:12px; }
+  .card h3 { margin:0 0 4px; }
+  .meta { color:var(--mut); font-size:13px; }
+  .tag, .chip { display:inline-block; border-radius:99px; padding:1px 10px; font-size:13px; margin:6px 6px 0 0; }
+  .tag { background:#e6f2ec; color:var(--g); }
+  .chip { background:#1e3932; color:#fff; }
+  .price { font-weight:700; color:var(--g); }
+  .note { margin-top:10px; padding:8px 10px; background:#f3f1e8; border-radius:8px; font-size:14px; white-space:pre-wrap; word-break:break-word; }
+  pre { white-space:pre-wrap; word-break:break-word; margin:8px 0 0; font:inherit; font-size:15px; }
+  .row { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  .two { display:flex; gap:8px; } .two > div { flex:1; }
+  .status { color:var(--mut); font-size:14px; margin-top:6px; }
+  label { display:block; font-size:14px; color:var(--mut); margin-top:10px; }
+  summary { cursor:pointer; font-weight:600; }
+  .letter { margin:22px 0 0; font-size:20px; font-weight:700; color:var(--g); border-bottom:2px solid var(--g); padding-bottom:2px; }
+  #filters { display:flex; gap:8px; margin-top:8px; }
+  #count { margin-top:10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>☕ Starbucks Receipts</h1>
+  <div id="auth"></div>
+</header>
+<main>
+  <input id="q" type="search" placeholder="Search name, base drink, ingredients, store, tags…">
+  <div id="filters">
+    <select id="fTemp"></select>
+    <select id="fType"></select>
+  </div>
+  <div id="count" class="meta"></div>
+
+  <details id="addBox" class="card" hidden>
+    <summary>+ Add a receipt</summary>
+    <label>Upload a screenshot (or paste an image)</label>
+    <input id="file" type="file" accept="image/*">
+    <div id="ocrStatus" class="status"></div>
+    <label>Drink name (your own name for it; if left empty, the base drink is used)</label>
+    <input id="title" type="text" placeholder="e.g. Matcha Cold Foam Iced Espresso">
+    <label>Base drink (auto-filled from the screenshot)</label>
+    <input id="base" type="text" placeholder="e.g. Iced Espresso">
+    <div class="two">
+      <div><label>Hot or cold</label><select id="temp"></select></div>
+      <div><label>Type</label><select id="dtype"></select></div>
+    </div>
+    <label>Store</label>
+    <input id="store" type="text" placeholder="e.g. El Camino &amp; Lawrence">
+    <label>Customizations and prices (editable)</label>
+    <textarea id="body"></textarea>
+    <label>Total price paid ($)</label>
+    <input id="price" type="number" step="0.01" min="0" placeholder="e.g. 5.00">
+    <label>Tags (comma-separated, optional)</label>
+    <input id="tags" type="text" placeholder="e.g. cold foam, oat milk, copycat">
+    <label>Notes (optional: what it copies or replaces, size tips, anything)</label>
+    <textarea id="notes" style="min-height:80px" placeholder="e.g. Copycat of a Chagee signature drink / Cortado alternative, but in grande"></textarea>
+    <div class="row"><button id="save">Save</button></div>
+    <div id="saveStatus" class="status"></div>
+  </details>
+
+  <div id="list"></div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script>
+// ====== Replace these two values with your own (Supabase → Project Settings → API) ======
+const SUPABASE_URL = 'https://ldbvtqtnjkwdajegljxq.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_2unbwZjmfWNfALZSyFbd_A_Xm6PtbqM';
+// =========================================================================================
+
+const TEMPS = ['Hot', 'Cold'];
+const TYPES = ['Coffee', 'Tea', 'Refresher', 'Other'];
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const $ = id => document.getElementById(id);
+let user = null, editingId = null, rows = [], timer;
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const numOrNull = v => (String(v).trim() === '' || isNaN(Number(v))) ? null : Number(v);
+const money = n => '$' + Number(n).toFixed(2);
+const nameOf = r => (r.title || '').trim() || (r.base_drink || '').trim();   // what we show and sort by
+const optionsHTML = (list, sel, blank) => `<option value="">${blank}</option>` + list.map(x => `<option${x === sel ? ' selected' : ''}>${x}</option>`).join('');
+
+$('temp').innerHTML = optionsHTML(TEMPS, '', '— Hot or cold —');
+$('dtype').innerHTML = optionsHTML(TYPES, '', '— Type —');
+$('fTemp').innerHTML = optionsHTML(TEMPS, '', 'All temperatures');
+$('fType').innerHTML = optionsHTML(TYPES, '', 'All types');
+
+// ---------- auth ----------
+function renderAuth() {
+  const box = $('auth');
+  if (user) {
+    box.innerHTML = `<span>${esc(user.email)}</span><button class="sec" id="out">Log out</button>`;
+    $('out').onclick = () => sb.auth.signOut();
+  } else {
+    box.innerHTML = `<input id="em" type="email" placeholder="Email to log in" style="width:170px;padding:6px"><button class="sec" id="go">Send login link</button>`;
+    $('go').onclick = async () => {
+      const email = $('em').value.trim();
+      if (!email) return;
+      const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.href.split('#')[0] } });
+      $('go').textContent = error ? 'Failed: ' + error.message : 'Sent — check your email';
+    };
+  }
+  $('addBox').hidden = !user;
+}
+sb.auth.onAuthStateChange((_e, session) => { user = session?.user ?? null; renderAuth(); render(); });
+
+// ---------- guess hot/cold and coffee/tea (the uploader can change both) ----------
+function detect(base, body) {
+  const b = (base || '').toLowerCase();
+  const all = b + ' ' + (body || '').toLowerCase();
+  let temp = '';
+  if (/\b(iced|cold brew|frappuccino|refresher|nitro)\b/.test(b) || /\b(ice|iced)\b|cold foam/.test(all)) temp = 'Cold';
+  else if (b) temp = 'Hot';
+  let type = '';
+  if (b) {
+    if (/refresher/.test(b)) type = 'Refresher';
+    else if (/\b(tea|chai|matcha|london fog|teavana)\b/.test(b)) type = 'Tea';
+    else if (/espresso|coffee|latte|americano|cappuccino|macchiato|mocha|cold brew|flat white|doppio|frappuccino/.test(b)) type = 'Coffee';
+    else type = 'Other';
+  }
+  return { temp, type };
+}
+
+// ---------- OCR + cleanup (made for the Starbucks app "Review order" screen) ----------
+// First line of the drink block = base drink. Keeps item prices; total goes to its own field.
+function parseReceipt(text) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const find = re => lines.findIndex(l => re.test(l));
+
+  let store = '';
+  const ci = find(/^caf[eé]\b/i);
+  if (ci >= 0 && lines[ci + 1]) {
+    store = lines[ci + 1].replace(/^[^A-Za-z0-9]+/, '').replace(/\s*\d+(\.\d+)?\s*mi\b.*$/i, '').trim();
+  }
+
+  let start = find(/or schedule/i);
+  let end = find(/rewards available|pairs well|^checkout/i);
+  if (start < 0) return { base: '', store, body: text.trim(), price: '', found: false };
+  start += 1;
+  if (end < start) end = lines.length;
+
+  let block = lines.slice(start, end).map(l => {
+    const amt = l.match(/\$\d+\.\d{2}\s*$/);
+    const letters = (l.match(/[A-Za-z]/g) || []).length;
+    if (amt && letters < 3) return 'Total ' + amt[0].trim();   // icon row + total price
+    return l.replace(/^[^A-Za-z0-9$]+/, '');
+  }).filter(l => (l.match(/[A-Za-z]/g) || []).length >= 2 || /\$\d/.test(l));
+
+  let price = '';
+  block = block.filter(l => {
+    const m = l.match(/^Total \$(\d+\.\d{2})$/);
+    if (m) { price = m[1]; return false; }
+    return true;
+  });
+
+  const base = block.shift() || '';
+  return { base, store, body: block.join('\n'), price, found: true };
+}
+
+async function runOCR(file) {
+  if (!file) return;
+  $('ocrStatus').textContent = 'Reading… 0%';
+  try {
+    const { data } = await Tesseract.recognize(file, 'eng', {
+      logger: m => { if (m.status === 'recognizing text') $('ocrStatus').textContent = `Reading… ${Math.round(m.progress * 100)}%`; }
+    });
+    const r = parseReceipt(data.text);
+    const d = detect(r.base, r.body);
+    $('base').value = r.base;
+    $('store').value = r.store;
+    $('body').value = r.body;
+    $('price').value = r.price;
+    $('temp').value = d.temp;
+    $('dtype').value = d.type;
+    $('ocrStatus').textContent = r.found
+      ? 'Done. Hot/cold and type are my guess — please double-check them along with the rest, and add your own drink name if you want one.'
+      : 'Done, but this screenshot looked different, so I kept all the text. Please trim it and fill in the fields.';
+  } catch (e) {
+    $('ocrStatus').textContent = 'Recognition failed: ' + e.message;
+  }
+}
+$('file').onchange = e => runOCR(e.target.files[0]);
+document.addEventListener('paste', e => {
+  if (!user) return;
+  const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+  if (item) { $('addBox').open = true; runOCR(item.getAsFile()); }
+});
+
+// ---------- save ----------
+$('save').onclick = async () => {
+  const body = $('body').value.trim();
+  if (!body) { $('saveStatus').textContent = 'Text can\u2019t be empty.'; return; }
+  $('save').disabled = true;
+  const { error } = await sb.from('receipts').insert({
+    title: $('title').value.trim(), base_drink: $('base').value.trim(), store: $('store').value.trim(),
+    temp: $('temp').value, drink_type: $('dtype').value,
+    body, price: numOrNull($('price').value), tags: $('tags').value.trim(), notes: $('notes').value.trim()
+  });
+  $('save').disabled = false;
+  if (error) { $('saveStatus').textContent = 'Save failed: ' + error.message; return; }
+  $('saveStatus').textContent = 'Saved ✓';
+  for (const id of ['body', 'title', 'base', 'store', 'price', 'tags', 'notes', 'temp', 'dtype']) $(id).value = '';
+  $('file').value = ''; $('ocrStatus').textContent = '';
+  load();
+};
+
+// ---------- list / search / filter (always A–Z by drink name, or base drink if no name) ----------
+async function load() {
+  const q = $('q').value.trim().replace(/[,()%*]/g, ' ');
+  let req = sb.from('receipts').select('*').limit(1000);
+  if ($('fTemp').value) req = req.eq('temp', $('fTemp').value);
+  if ($('fType').value) req = req.eq('drink_type', $('fType').value);
+  if (q) req = req.or(`title.ilike.%${q}%,base_drink.ilike.%${q}%,body.ilike.%${q}%,notes.ilike.%${q}%,tags.ilike.%${q}%,store.ilike.%${q}%,author.ilike.%${q}%`);
+  const { data, error } = await req;
+  if (error) { $('list').innerHTML = `<div class="card">Failed to load: ${esc(error.message)}</div>`; return; }
+  rows = data.sort((a, b) => {
+    const ta = nameOf(a), tb = nameOf(b);
+    if (!ta !== !tb) return ta ? -1 : 1;               // nameless go last
+    return ta.localeCompare(tb, 'en', { sensitivity: 'base' }) || a.id - b.id;
+  });
+  render();
+}
+$('q').oninput = () => { clearTimeout(timer); timer = setTimeout(load, 300); };
+$('fTemp').onchange = $('fType').onchange = load;
+
+function letterOf(r) {
+  const t = nameOf(r);
+  if (!t) return 'Untitled';
+  const c = t[0].toUpperCase();
+  return /[A-Z]/.test(c) ? c : '#';
+}
+
+function cardHTML(r) {
+  const mine = user && r.user_id === user.id;
+  const date = new Date(r.created_at).toLocaleDateString('en-US');
+  if (editingId === r.id) {
+    return `<div class="card">
+      <label>Drink name</label><input type="text" id="et" value="${esc(r.title)}">
+      <label>Base drink</label><input type="text" id="eb2" value="${esc(r.base_drink)}">
+      <div class="two">
+        <div><label>Hot or cold</label><select id="etemp">${optionsHTML(TEMPS, r.temp, '— Hot or cold —')}</select></div>
+        <div><label>Type</label><select id="etype">${optionsHTML(TYPES, r.drink_type, '— Type —')}</select></div>
+      </div>
+      <label>Store</label><input type="text" id="es" value="${esc(r.store)}">
+      <label>Customizations and prices</label><textarea id="eb">${esc(r.body)}</textarea>
+      <label>Total price paid ($)</label><input type="number" step="0.01" min="0" id="ep" value="${r.price ?? ''}">
+      <label>Tags</label><input type="text" id="eg" value="${esc(r.tags)}">
+      <label>Notes</label><textarea id="en" style="min-height:80px">${esc(r.notes)}</textarea>
+      <div class="row"><button onclick="saveEdit(${r.id})">Save</button><button class="sec" onclick="editingId=null;render()">Cancel</button></div>
+    </div>`;
+  }
+  const chips = [r.temp, r.drink_type].filter(Boolean).map(c => `<span class="chip">${esc(c)}</span>`).join('');
+  const tags = (r.tags || '').split(',').map(t => t.trim()).filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join('');
+  const hasName = (r.title || '').trim();
+  const baseLine = hasName && r.base_drink ? `Base: ${esc(r.base_drink)} · ` : '';
+  const storeLine = r.store ? `${esc(r.store)} · ` : '';
+  const priceLine = r.price != null ? `<span class="price">${money(r.price)}</span> · ` : '';
+  return `<div class="card">
+    <h3>${esc(nameOf(r)) || '<span class="meta">(Untitled)</span>'}</h3>
+    <div class="meta">${priceLine}${baseLine}${storeLine}Added by ${esc(r.author)} · ${date}</div>
+    <div>${chips}${tags}</div>
+    <pre>${esc(r.body)}</pre>
+    ${r.notes ? `<div class="note">📝 ${esc(r.notes)}</div>` : ''}
+    ${mine ? `<div class="row"><button class="sec" onclick="editingId=${r.id};render()">Edit</button><button class="danger" onclick="del(${r.id})">Delete</button></div>` : ''}
+  </div>`;
+}
+
+function render() {
+  $('count').textContent = rows.length ? `${rows.length} receipt${rows.length === 1 ? '' : 's'}, A–Z` : '';
+  if (!rows.length) { $('list').innerHTML = '<div class="card meta">Nothing here yet.</div>'; return; }
+  let html = '', last = null;
+  for (const r of rows) {
+    const L = letterOf(r);
+    if (L !== last) { html += `<div class="letter">${L}</div>`; last = L; }
+    html += cardHTML(r);
+  }
+  $('list').innerHTML = html;
+}
+
+async function saveEdit(id) {
+  const { error } = await sb.from('receipts').update({
+    title: $('et').value.trim(), base_drink: $('eb2').value.trim(), store: $('es').value.trim(),
+    temp: $('etemp').value, drink_type: $('etype').value,
+    body: $('eb').value.trim(), price: numOrNull($('ep').value), tags: $('eg').value.trim(), notes: $('en').value.trim()
+  }).eq('id', id);
+  if (error) { alert('Save failed: ' + error.message); return; }
+  editingId = null; load();
+}
+async function del(id) {
+  if (!confirm('Delete this receipt?')) return;
+  const { error } = await sb.from('receipts').delete().eq('id', id);
+  if (error) { alert('Delete failed: ' + error.message); return; }
+  load();
+}
+
+sb.auth.getSession().then(({ data }) => { user = data.session?.user ?? null; renderAuth(); load(); });
+</script>
+</body>
+</html>
